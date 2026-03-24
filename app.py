@@ -7,115 +7,119 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIG ---
 st.set_page_config(page_title="NHL PROTOTYPE 2026", layout="wide", page_icon="🏒")
 
-# Auto-refresh every 60 seconds to keep data live
-st_autorefresh(interval=60000, key="nhl_refresher")
+# Auto-refresh every 5 minutes to keep things smooth
+st_autorefresh(interval=300000, key="nhl_refresher")
 
-# --- DATA ENGINE ---
-@st.cache_data(ttl=300)
-def fetch_nhl_data():
-    # Fetching summary stats for the 2025-26 Season
-    url = "https://api.nhle.com/stats/rest/en/skater/summary?cayenneExp=seasonId=20252026"
-    try:
-        r = requests.get(url, timeout=10)
-        data = r.json().get('data', [])
-        if not data:
-            return pd.DataFrame()
-        return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"API Connection Error: {e}")
-        return pd.DataFrame()
+# --- DATA ENGINE (PAGINATED) ---
+@st.cache_data(ttl=3600)  # Cache for 1 hour since full rosters don't change fast
+def fetch_all_skaters():
+    all_players = []
+    start_index = 0
+    limit = 100
+    
+    # Placeholder for a loading message in the UI
+    status_text = st.empty()
+    status_text.text("Connecting to NHL API...")
+
+    while True:
+        url = f"https://api.nhle.com/stats/rest/en/skater/summary?cayenneExp=seasonId=20252026&start={start_index}&limit={limit}"
+        try:
+            r = requests.get(url, timeout=10)
+            res = r.json()
+            data = res.get('data', [])
+            total = res.get('total', 0)
+            
+            if not data:
+                break
+                
+            all_players.extend(data)
+            status_text.text(f"📥 Loading players: {len(all_players)} / {total}")
+            
+            start_index += limit
+            if len(all_players) >= total:
+                break
+        except Exception as e:
+            st.error(f"Error fetching data: {e}")
+            break
+            
+    status_text.empty() # Remove loading text when done
+    return pd.DataFrame(all_players)
 
 def get_player_edge_stats(player_name):
-    # Mock EDGE stats (Placeholder for NHL EDGE Percentile API)
+    # Mock EDGE stats (Placeholder for NHL EDGE tracking integration)
     return {
         "labels": ['Speed', 'Shot Power', 'Zone Time', 'Stick Handling', 'Faceoff %'],
-        "values": [92, 85, 78, 95, 60] if "McDavid" in player_name else [70, 75, 82, 65, 50]
+        "values": [95, 82, 88, 98, 55] if "McDavid" in player_name else [70, 75, 65, 60, 50]
     }
 
 # --- APP UI ---
-st.title("🏒 NHL Elite Performance Dashboard (v2026.1)")
+st.title("🏒 NHL Full League Analytics (2025-26)")
 st.markdown("---")
 
-df = fetch_nhl_data()
+df = fetch_all_skaters()
 
 if not df.empty:
-    # --- 1. DEFENSIVE COLUMN CHECKING ---
-    # We look for whatever the NHL decided to name the 'team' column today
-    team_cols = ['teamAbbrev', 'teamAbbreviation', 'teamName']
-    team_col = next((col for col in team_cols if col in df.columns), None)
+    # --- DYNAMIC COLUMN DETECTOR ---
+    name_col = next((c for c in ['skaterFullName', 'fullName'] if c in df.columns), 'skaterFullName')
+    team_col = next((c for c in ['teamAbbrev', 'teamAbbreviation'] if c in df.columns), 'teamAbbrev')
+
+    # --- SIDEBAR FILTERS ---
+    st.sidebar.header("Filter Roster")
     
-    name_cols = ['skaterFullName', 'fullName', 'lastName']
-    name_col = next((col for col in name_cols if col in df.columns), 'skaterFullName')
-
-    # --- 2. SIDEBAR FILTERS ---
-    st.sidebar.header("Global Filters")
+    # 1. Search Box
+    search_query = st.sidebar.text_input("🔍 Search Player Name", "")
     
-    if team_col:
-        team_list = sorted(df[team_col].unique())
-        selected_teams = st.sidebar.multiselect("Select Teams", team_list, default=team_list[:3])
-    else:
-        selected_teams = []
-        st.sidebar.warning("Team data unavailable")
+    # 2. Team Filter
+    team_list = sorted(df[team_col].unique())
+    selected_teams = st.sidebar.multiselect("Select Teams", team_list, default=team_list)
+    
+    # 3. Points Filter
+    max_pts = int(df['points'].max())
+    min_pts = st.sidebar.slider("Minimum Points", 0, max_pts, 0)
 
-    min_pts = st.sidebar.slider("Minimum Points Threshold", 0, int(df['points'].max()), 10)
-
-    # --- 3. FILTER LOGIC ---
-    mask = df['points'] >= min_pts
-    if selected_teams and team_col:
-        mask = mask & df[team_col].isin(selected_teams)
+    # --- APPLY FILTERS ---
+    mask = (df['points'] >= min_pts) & (df[team_col].isin(selected_teams))
+    if search_query:
+        mask = mask & (df[name_col].str.contains(search_query, case=False))
     
     filtered_df = df[mask].copy()
 
-    # --- 4. MAIN TABS ---
-    tab1, tab2, tab3 = st.tabs(["📊 Leaderboard", "🎯 EDGE Analytics", "🔥 Scoring Heatmaps"])
+    # --- TOP METRICS ---
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Players Loaded", len(df))
+    m2.metric("Filtered Set", len(filtered_df))
+    m3.metric("League Avg Points", round(df['points'].mean(), 1))
+
+    # --- TABS ---
+    tab1, tab2, tab3 = st.tabs(["📊 Full Leaderboard", "🎯 EDGE Player Card", "🔥 Scoring Zones"])
 
     with tab1:
-        st.subheader("Active Performance Metrics")
-        display_cols = [name_col, team_col, 'goals', 'assists', 'points', 'gamesPlayed']
-        # Only show columns that actually exist
-        final_cols = [c for c in display_cols if c in filtered_df.columns]
-        st.dataframe(filtered_df[final_cols].sort_values(by='points', ascending=False), use_container_width=True)
+        st.dataframe(
+            filtered_df[[name_col, team_col, 'positionCode', 'gamesPlayed', 'goals', 'assists', 'points']]
+            .sort_values(by='points', ascending=False), 
+            use_container_width=True,
+            height=500
+        )
 
     with tab2:
         if not filtered_df.empty:
-            col_sel, col_viz = st.columns([1, 2])
-            with col_sel:
-                player_to_viz = st.selectbox("Select Player for EDGE Card", filtered_df[name_col])
-                edge_data = get_player_edge_stats(player_to_viz)
+            p_name = st.selectbox("Analyze Player", filtered_df[name_col].unique())
+            stats = get_player_edge_stats(p_name)
             
-            with col_viz:
-                fig = go.Figure(data=go.Scatterpolar(
-                    r=edge_data['values'],
-                    theta=edge_data['labels'],
-                    fill='toself',
-                    line_color='#FF4B4B'
-                ))
-                fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
+            fig = go.Figure(data=go.Scatterpolar(r=stats['values'], theta=stats['labels'], fill='toself', line_color='#1d4ed8'))
+            fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Adjust filters to select a player for analysis.")
+            st.warning("No players found with current filters.")
 
     with tab3:
-        st.subheader("Shot Density & Goal Heatmap")
-        # Simulated heatmap data (mapping to offensive zone)
-        # In full production, pull x,y from api-web.nhle.com/v1/gamecenter/{id}/play-by-play
-        shot_x = [70, 85, 90, 75, 88, 92, 65, 77, 85, 80, 82]
-        shot_y = [-10, 5, 2, -15, 0, 12, 20, -5, -2, 8, -8]
-        
+        # Static heatmap for prototype; update with API x,y coords for live tracking
         fig_heat = go.Figure(go.Histogram2dContour(
-            x=shot_x, y=shot_y, colorscale='Reds', name="Density", nbinsx=20, nbinsy=20
+            x=[80, 85, 90, 70, 88, 92, 75], y=[0, 5, -5, 10, -2, 3, -12], 
+            colorscale='YlOrRd', name="Density"
         ))
-        
-        # Overlay a "Goal" star
-        fig_heat.add_trace(go.Scatter(x=[88], y=[0], mode='markers', marker=dict(symbol='star', size=15, color='gold', line=dict(width=1, color='black'))))
-        
-        fig_heat.update_layout(
-            xaxis=dict(range=[0, 100], title="Ice X (Feet)", showgrid=False),
-            yaxis=dict(range=[-42.5, 42.5], title="Ice Y (Feet)", showgrid=False),
-            template="plotly_white",
-            shapes=[dict(type="rect", x0=89, y0=-3, x1=90, y1=3, line=dict(color="blue", width=3))] # Net
-        )
+        fig_heat.update_layout(xaxis=dict(range=[0, 100]), yaxis=dict(range=[-42.5, 42.5]), template="plotly_white", title="Scoring Intensity")
         st.plotly_chart(fig_heat, use_container_width=True)
 
 else:
-    st.error("Data Source Offline: The NHL API did not return any skater stats.")
+    st.error("Could not load player data. Please check your NHL API connection.")
